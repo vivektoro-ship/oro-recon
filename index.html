@@ -311,14 +311,14 @@ section.s-section{margin-bottom:28px;}
     <div class="card">
 
       <section class="s-section">
-        <div class="s-label">🏦 Partner Bank</div>
+        <div class="s-label">Partner Bank</div>
         <div class="s-row"><label>Partner Name</label><input type="text" id="s-partner" placeholder="Federal Bank"></div>
         <div class="s-row"><label>Partner Column (Oro file)</label><input type="text" id="s-partner-col" placeholder="Partners → Partner Name"></div>
         <div class="s-row"><label>Oro Sheet Name</label><input type="text" id="s-oro-sheet" placeholder="Query result"></div>
       </section>
 
       <section class="s-section">
-        <div class="s-label">✅ Active Loan Statuses</div>
+        <div class="s-label">Active Loan Statuses</div>
         <p style="font-size:.9rem;color:var(--dim2);margin-bottom:10px;">Toggle to include/exclude. Only active statuses are matched against Fed Bank.</p>
         <div class="status-grid" id="statusGrid"></div>
         <div style="display:flex;gap:8px;margin-top:6px;">
@@ -330,27 +330,27 @@ section.s-section{margin-bottom:28px;}
       </section>
 
       <section class="s-section">
-        <div class="s-label">📋 Scheme Mappings</div>
+        <div class="s-label">Scheme Mappings</div>
         <p style="font-size:.9rem;color:var(--dim2);margin-bottom:10px;">If Fed Bank scheme name contains keyword → treat as Oro scheme name.</p>
         <div id="schemeRows"></div>
         <button class="add-btn" onclick="addSchemeRow()">+ Add Mapping</button>
       </section>
 
       <section class="s-section">
-        <div class="s-label">⚖️ Match Tolerances</div>
+        <div class="s-label">Match Tolerances</div>
         <div class="s-row"><label>Date tolerance (days)</label><input type="number" id="s-date-tol" min="0" step="1" style="width:80px;flex:none;"></div>
         <div class="s-row" style="margin-top:8px;"><label>ROI tolerance (%)</label><input type="number" id="s-roi-tol" min="0" step="0.01" style="width:80px;flex:none;"></div>
       </section>
 
       <section class="s-section">
-        <div class="s-label">🔬 Custom Check Parameters</div>
+        <div class="s-label">Custom Check Parameters</div>
         <p style="font-size:.9rem;color:var(--dim2);margin-bottom:10px;">Extra fields to cross-check. Mismatches appear in the Other Issues sheet.</p>
         <div class="pcards" id="paramRows"></div>
         <button class="add-btn" onclick="addParamRow()">+ Add Parameter</button>
       </section>
 
       <section class="s-section">
-        <div class="s-label">🔒 Change Password</div>
+        <div class="s-label">Change Password</div>
         <div class="s-row"><label>New password</label><input type="password" id="s-newpw" placeholder="Leave blank to keep current"></div>
       </section>
 
