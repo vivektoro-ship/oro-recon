@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Oro Reconciliation Engine</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="xlsx.full.min.js"></script>
 <style>
 :root {
   --dark:   #0b0b0b;
@@ -623,6 +623,7 @@ async function runRecon() {
   await new Promise(r=>setTimeout(r,30));
 
   try {
+    if (typeof XLSX==='undefined') throw new Error("Spreadsheet engine (xlsx.full.min.js) did not load. Refresh the page; if it persists, your network may be blocking the file.");
     log(`Reading Fed Bank file: ${uploads.fed.name}`);
     const fedWb = await parseExcelOrCsv(uploads.fed);
     const {headers:fedH, rows:fedRows} = getSheetRows(fedWb, fedWb.SheetNames[0]);
