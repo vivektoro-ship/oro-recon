@@ -504,10 +504,32 @@ function findCol(headers, ...candidates) {
 const FED_LAN_CANDS = ["Oro Loan ID","FREE_TEXT_13","Loan Number","LAN","Loan ID"];
 const ORO_LAN_CANDS = ["Loan Number","Loan Account No.","LAN","Oro Loan ID","Loan ID"];
 
+// Human-readable dump of per-sheet diagnostics (main thread only).
+function fmtDiag(diag){
+  if(!diag||!diag.length) return '  (no sheets found in workbook)';
+  return diag.map(d=>{
+    const samp = d.sample&&d.sample.length ? ` | cells e.g. ${d.sample.join('  ')}` : '';
+    return `  • '${d.name}': ${d.cells} cells, range=${d.ref||'(none)'}${samp}`;
+  }).join('\n');
+}
+
 // ── Smart sheet + header-row detection ────────────────────────────────
 // These run inside the Web Worker too (serialised via .toString()), so keep
 // them ES5-plain, self-contained, and underscore-named.
 function _cstr(v){ return (v===undefined||v===null) ? '' : String(v).trim(); }
+// A light dump of what SheetJS actually parsed for a sheet, so a failing
+// file can be diagnosed from the error text alone.
+function _sheetDiag(nm, ws){
+  if(!ws) return {name:nm, ref:null, cells:0, sample:[]};
+  var keys=Object.keys(ws).filter(function(k){return k.charAt(0)!=="!";});
+  var sample=[];
+  for(var i=0;i<keys.length && sample.length<6;i++){
+    var c=ws[keys[i]];
+    var v=(c && c.v!==undefined && c.v!==null) ? String(c.v) : "";
+    sample.push(keys[i]+"="+v.slice(0,18));
+  }
+  return {name:nm, ref:(ws["!ref"]||null), cells:keys.length, sample:sample};
+}
 // Read a worksheet to an array-of-arrays. Some exporters (e.g. Metabase /
 // streaming xlsx writers) omit or under-report the worksheet dimension
 // (!ref), which makes SheetJS return ZERO rows even though every cell is
@@ -559,9 +581,10 @@ function _headerRowIdx(raw, cands){
 // then most data rows; fall back to the preferred/first sheet. Returns the
 // raw array-of-arrays already sliced so raw[0] IS the real header row.
 function _chooseSheet(wb, pref, cands){
-  var names=wb.SheetNames, evals=[];
+  var names=wb.SheetNames, evals=[], diag=[];
   for(var s=0;s<names.length;s++){
     var nm=names[s];
+    diag.push(_sheetDiag(nm, wb.Sheets[nm]));
     var raw=_readAOA(wb.Sheets[nm]);
     var hr=_headerRowIdx(raw,cands);
     var hasCand=_rowHasCand(raw[hr]||[],cands);
@@ -580,7 +603,7 @@ function _chooseSheet(wb, pref, cands){
   return { name:chosen.name, fallback:(!!pref && chosen.name!==pref),
            raw:chosen.raw.slice(chosen.hr), headerOffset:chosen.hr,
            hadCand:chosen.hasCand, refRepaired:!!chosen.repaired,
-           sheetCount:names.length, sheetNames:names };
+           sheetCount:names.length, sheetNames:names, diag:diag };
 }
 
 function parseAmount(v) {
@@ -701,7 +724,7 @@ function getXlsxWorker() {
   const xlsxUrl = JSON.stringify(new URL('xlsx.full.min.js', location.href).href);
   const code =
     'self.importScripts(' + xlsxUrl + ');' +
-    _cstr.toString() + _readAOA.toString() + _rowHasCand.toString() + _headerRowIdx.toString() + _chooseSheet.toString() +
+    _cstr.toString() + _sheetDiag.toString() + _readAOA.toString() + _rowHasCand.toString() + _headerRowIdx.toString() + _chooseSheet.toString() +
     'self.onmessage=function(e){var d=e.data;try{' +
     'var wb=XLSX.read(d.buf,{type:"array",cellDates:false,raw:false});' +
     'var r=_chooseSheet(wb,d.pref,d.cands||[]); r.ok=true;' +
@@ -788,6 +811,7 @@ async function runRecon() {
     if (oro.refRepaired) log(`  ⚠️  Sheet had a missing/broken range — rebuilt it from the actual cells`);
     const {headers:oroH, rows:oroAllRows} = rowsFromRaw(oro.raw);
     log(`  ${oroAllRows.length.toLocaleString()} total rows`);
+    if (oroAllRows.length===0 || oroH.filter(h=>h).length===0) log(`  Sheet contents seen:\n${fmtDiag(oro.diag)}`);
     await setProg(52, `Detecting columns…`);
 
     // Detect columns
@@ -810,7 +834,7 @@ async function runRecon() {
     const partnerOro = findCol(oroH, CFG.partner_col);
 
     if (!lanFed) throw new Error(`Cannot find Loan ID column in Fed Bank file.\nSheets: ${(fed.sheetNames||[]).join(', ')}\nHeaders read: ${fedH.slice(0,15).join(', ')}`);
-    if (!lanOro) throw new Error(`Cannot find Loan ID column in Oro file.\nSheets: ${(oro.sheetNames||[]).join(', ')}\nHeaders read: ${oroH.slice(0,15).join(', ')}`);
+    if (!lanOro) throw new Error(`Cannot find Loan ID column in Oro file.\nSheets: ${(oro.sheetNames||[]).join(', ')}\nHeaders read: ${oroH.slice(0,15).join(', ')||'(none — sheet read as empty)'}\nWhat the engine saw:\n${fmtDiag(oro.diag)}`);
 
     log(`Loan ID — Fed Bank: '${lanFed}' | Oro: '${lanOro}'`);
     if (amtFed) log(`Sanction Amount — Fed Bank: '${amtFed}' | Oro: '${amtOro}'`);
