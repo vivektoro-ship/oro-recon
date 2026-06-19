@@ -75,8 +75,18 @@ header p{font-size:.98rem;color:var(--dim2);margin-top:5px;letter-spacing:.06em;
 .drop-zone.filled .dz-label{color:var(--green);}
 .dz-hint{font-size:.88rem;color:var(--dim);}
 .dz-name{font-size:.98rem;color:var(--dim2);margin-top:10px;word-break:break-all;min-height:16px;}
-.drop-zone.filled .dz-name{color:var(--green);font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px;}
+.drop-zone.filled .dz-name{color:var(--green);font-weight:500;display:flex;align-items:center;justify-content:center;gap:6px;max-width:100%;}
 .dz-name svg{flex:none;}
+.dz-name .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.dz-size{font-size:.82rem;color:var(--dim);font-weight:500;margin-top:5px;min-height:14px;}
+.drop-zone:not(.filled) .dz-size{display:none;}
+/* × remove button — only shows once a file is loaded, sits above the file input */
+.dz-remove{position:absolute;top:8px;right:8px;z-index:3;display:none;
+  width:26px;height:26px;border:none;border-radius:6px;cursor:pointer;padding:0;
+  background:rgba(63,207,142,.12);color:var(--green);align-items:center;justify-content:center;
+  transition:background .15s,color .15s;}
+.drop-zone.filled .dz-remove{display:flex;}
+.dz-remove:hover{background:rgba(255,107,107,.16);color:#ff6b6b;}
 
 /* ── Run button ── */
 #runBtn{
@@ -263,10 +273,12 @@ section.s-section{margin-bottom:28px;}
              ondrop="dzDrop('fed',this,event)">
           <input type="file" id="file-fed" accept=".xlsx,.xls,.csv"
                  onchange="fileChosen('fed',this)">
+          <button type="button" class="dz-remove" id="rm-fed" title="Remove file" onclick="clearFile('fed',event)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
           <div class="dz-icon"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-5 9 5"/><path d="M4 9.5h16"/><path d="M5.5 10v7M9.5 10v7M14.5 10v7M18.5 10v7"/><path d="M3.5 20.5h17"/></svg></div>
           <div class="dz-label">Fed Bank File</div>
           <div class="dz-hint">.xlsx / .xls / .csv</div>
           <div class="dz-name" id="name-fed">Drop here or click to browse</div>
+          <div class="dz-size" id="size-fed"></div>
         </div>
 
         <div class="drop-zone" id="dz-oro"
@@ -274,10 +286,12 @@ section.s-section{margin-bottom:28px;}
              ondrop="dzDrop('oro',this,event)">
           <input type="file" id="file-oro" accept=".xlsx,.xls"
                  onchange="fileChosen('oro',this)">
+          <button type="button" class="dz-remove" id="rm-oro" title="Remove file" onclick="clearFile('oro',event)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
           <div class="dz-icon"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 9.5h17M3.5 15h17M9.5 4v16"/></svg></div>
           <div class="dz-label">Oro File</div>
           <div class="dz-hint">.xlsx / .xls</div>
           <div class="dz-name" id="name-oro">Drop here or click to browse</div>
+          <div class="dz-size" id="size-oro"></div>
         </div>
 
       </div>
@@ -820,18 +834,56 @@ function dzDrop(which,el,e){e.preventDefault();el.classList.remove('drag-over');
 function fileChosen(which,inp){if(inp.files[0])setFile(which,inp.files[0]);}
 
 const uploads={fed:null,oro:null};
+const DZ_HINTS={fed:'.xlsx / .xls / .csv', oro:'.xlsx / .xls'};
+
+// Shorten a long file name but keep the extension: "Oro Database Ju….xlsx"
+function shortName(name,max){
+  max=max||26;
+  if(name.length<=max) return name;
+  const dot=name.lastIndexOf('.');
+  const ext=dot>0?name.slice(dot):'';
+  const stem=dot>0?name.slice(0,dot):name;
+  const keep=Math.max(6,max-ext.length-1);
+  return stem.slice(0,keep)+'…'+ext;
+}
+function fmtSize(bytes){
+  if(bytes>=1048576) return (bytes/1048576).toFixed(1)+' MB';
+  if(bytes>=1024)    return (bytes/1024).toFixed(0)+' KB';
+  return bytes+' B';
+}
+
 function setFile(which,file){
   uploads[which]=file;
   const check='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
-  document.getElementById('name-'+which).innerHTML=check+'<span>'+escH(file.name)+'</span>';
+  const nameEl=document.getElementById('name-'+which);
+  nameEl.innerHTML=check+'<span class="fname">'+escH(shortName(file.name))+'</span>';
+  nameEl.title=file.name; // full name on hover
+  const big = file.size>=18*1024*1024;
+  document.getElementById('size-'+which).textContent = fmtSize(file.size)+(big?' · large file, will stream ✓':'');
   const dz=document.getElementById('dz-'+which);
   dz.classList.add('filled');
-  const hint=dz.querySelector('.dz-hint'); if(hint) hint.textContent='Uploaded';
+  const hint=dz.querySelector('.dz-hint'); if(hint) hint.textContent='Click ✕ to replace';
   updateRunBtn();
 }
+
+function clearFile(which,e){
+  if(e){ e.preventDefault(); e.stopPropagation(); }
+  uploads[which]=null;
+  const inp=document.getElementById('file-'+which); if(inp) inp.value=''; // allow re-picking same file
+  const dz=document.getElementById('dz-'+which);
+  dz.classList.remove('filled');
+  const nameEl=document.getElementById('name-'+which);
+  nameEl.textContent='Drop here or click to browse'; nameEl.removeAttribute('title');
+  document.getElementById('size-'+which).textContent='';
+  const hint=dz.querySelector('.dz-hint'); if(hint) hint.textContent=DZ_HINTS[which]||'';
+  updateRunBtn();
+}
+
 function updateRunBtn(){
   const b=document.getElementById('runBtn');
-  if(uploads.fed&&uploads.oro){b.className='ready';b.textContent='▶  RUN RECONCILIATION';}
+  const ready=uploads.fed&&uploads.oro;
+  b.className=ready?'ready':'';
+  b.textContent='▶  RUN RECONCILIATION';
 }
 
 // ═══════════════════════════════════════════════════════════════
