@@ -1244,6 +1244,8 @@ async function runRecon() {
         // Custom params
         const customFlags=[], customDisp=[];
         for (const cp of CFG.custom_parameters||[]) {
+          // CUST_ID is informational only (shown in Fed Bank Only sheet) — never recon it
+          if (cp.fed_col && cp.fed_col.toUpperCase().replace(/[^A-Z]/g,'').includes('CUSTID')) continue;
           const cpFedCol=findCol(fedH,cp.fed_col)||null;
           const cpOroCol=findCol(oroH,cp.oro_col)||null;
           const fedRaw=cpFedCol?cellStr(fr[cpFedCol]||''):'';
