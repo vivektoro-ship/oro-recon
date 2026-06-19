@@ -498,6 +498,68 @@ function findCol(headers, ...candidates) {
   return null;
 }
 
+// Loan-ID column names we expect in each file. Used BOTH to pick the right
+// sheet/header row up front and to detect the Loan ID column afterwards, so
+// the two stay in sync.
+const FED_LAN_CANDS = ["Oro Loan ID","FREE_TEXT_13","Loan Number","LAN","Loan ID"];
+const ORO_LAN_CANDS = ["Loan Number","Loan Account No.","LAN","Oro Loan ID","Loan ID"];
+
+// ── Smart sheet + header-row detection ────────────────────────────────
+// These run inside the Web Worker too (serialised via .toString()), so keep
+// them ES5-plain, self-contained, and underscore-named.
+function _cstr(v){ return (v===undefined||v===null) ? '' : String(v).trim(); }
+function _rowHasCand(row, cands){
+  if(!row) return false;
+  for(var j=0;j<row.length;j++){
+    var c=_cstr(row[j]).toLowerCase();
+    if(!c) continue;
+    for(var k=0;k<cands.length;k++){
+      var cc=cands[k].toLowerCase();
+      if(c===cc || c.indexOf(cc)>=0) return true;
+    }
+  }
+  return false;
+}
+// Find the header row within a sheet: first row (in the top 25) that holds a
+// known loan-id column; else the first row with >=2 non-numeric text cells.
+function _headerRowIdx(raw, cands){
+  var lim=Math.min(raw.length,25);
+  for(var i=0;i<lim;i++) if(_rowHasCand(raw[i],cands)) return i;
+  for(var i=0;i<lim;i++){
+    var r=raw[i]||[], c=0;
+    for(var j=0;j<r.length;j++){ var v=_cstr(r[j]); if(v && isNaN(Number(v))) c++; }
+    if(c>=2) return i;
+  }
+  return 0;
+}
+// Pick the best sheet out of the whole workbook: prefer a sheet whose header
+// actually contains a loan-id column (the preferred-name sheet wins ties),
+// then most data rows; fall back to the preferred/first sheet. Returns the
+// raw array-of-arrays already sliced so raw[0] IS the real header row.
+function _chooseSheet(wb, pref, cands){
+  var names=wb.SheetNames, evals=[];
+  for(var s=0;s<names.length;s++){
+    var nm=names[s];
+    var raw=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:null,raw:true});
+    var hr=_headerRowIdx(raw,cands);
+    var hasCand=_rowHasCand(raw[hr]||[],cands);
+    evals.push({name:nm, raw:raw, hr:hr, hasCand:hasCand,
+                dataRows:Math.max(0,raw.length-hr-1), isPref:(!!pref && nm===pref)});
+  }
+  var withCand=evals.filter(function(c){return c.hasCand;});
+  var chosen;
+  if(withCand.length){
+    chosen = withCand.filter(function(c){return c.isPref;})[0] ||
+             withCand.reduce(function(a,b){return b.dataRows>a.dataRows?b:a;});
+  } else {
+    chosen = evals.filter(function(c){return c.isPref;})[0] || evals[0] ||
+             {name:(names[0]||''), raw:[], hr:0, hasCand:false, dataRows:0};
+  }
+  return { name:chosen.name, fallback:(!!pref && chosen.name!==pref),
+           raw:chosen.raw.slice(chosen.hr), headerOffset:chosen.hr,
+           hadCand:chosen.hasCand, sheetCount:names.length, sheetNames:names };
+}
+
 function parseAmount(v) {
   const s = cellStr(v).replace(/,/g,'').replace(/₹/g,'').trim();
   const n = parseFloat(s);
@@ -616,26 +678,25 @@ function getXlsxWorker() {
   const xlsxUrl = JSON.stringify(new URL('xlsx.full.min.js', location.href).href);
   const code =
     'self.importScripts(' + xlsxUrl + ');' +
+    _cstr.toString() + _rowHasCand.toString() + _headerRowIdx.toString() + _chooseSheet.toString() +
     'self.onmessage=function(e){var d=e.data;try{' +
     'var wb=XLSX.read(d.buf,{type:"array",cellDates:false,raw:false});' +
-    'var name=(d.pref&&wb.SheetNames.indexOf(d.pref)>=0)?d.pref:wb.SheetNames[0];' +
-    'var raw=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:null,raw:true});' +
-    'self.postMessage({ok:true,name:name,fallback:(!!d.pref&&name!==d.pref),raw:raw});' +
+    'var r=_chooseSheet(wb,d.pref,d.cands||[]); r.ok=true;' +
+    'self.postMessage(r);' +
     '}catch(err){self.postMessage({ok:false,error:String(err&&err.message||err)});}};';
   _xlsxWorker = new Worker(URL.createObjectURL(new Blob([code], {type:'application/javascript'})));
   return _xlsxWorker;
 }
 
-function readSheet(file, preferredSheet) {
+function readSheet(file, preferredSheet, cands) {
+  cands = cands || [];
   return readFile(file).then(buf => new Promise((resolve, reject) => {
     let worker = null;
     try { worker = getXlsxWorker(); } catch(_) { worker = null; }
     if (!worker) { // main-thread fallback
       try {
         const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:false});
-        const name = (preferredSheet && wb.SheetNames.includes(preferredSheet)) ? preferredSheet : wb.SheetNames[0];
-        const raw = XLSX.utils.sheet_to_json(wb.Sheets[name], {header:1, defval:null, raw:true});
-        return resolve({name, fallback:(!!preferredSheet && name!==preferredSheet), raw});
+        return resolve(_chooseSheet(wb, preferredSheet, cands));
       } catch(err) { return reject(err); }
     }
     const cleanup = () => { worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); };
@@ -643,7 +704,7 @@ function readSheet(file, preferredSheet) {
     const onErr = err => { cleanup(); _xlsxWorker = null; reject(new Error('Could not read file (it may be too large or corrupt): ' + (err.message||'worker error'))); };
     worker.addEventListener('message', onMsg);
     worker.addEventListener('error', onErr);
-    worker.postMessage({buf, pref: preferredSheet || null}, [buf]); // transfer buffer = no copy
+    worker.postMessage({buf, pref: preferredSheet || null, cands}, [buf]); // transfer buffer = no copy
   }));
 }
 
@@ -689,21 +750,25 @@ async function runRecon() {
     if (typeof XLSX==='undefined') throw new Error("Spreadsheet engine (xlsx.full.min.js) did not load. Refresh the page; if it persists, your network may be blocking the file.");
     await setProg(3, `Reading Fed Bank file…`);
     log(`Reading Fed Bank file: ${uploads.fed.name}`);
-    const fed = await readSheet(uploads.fed, null);
+    const fed = await readSheet(uploads.fed, null, FED_LAN_CANDS);
     const {headers:fedH, rows:fedRows} = rowsFromRaw(fed.raw);
+    if (fed.sheetCount>1) log(`  Using sheet '${fed.name}' (of ${fed.sheetCount}: ${fed.sheetNames.join(', ')})`);
+    if (fed.headerOffset>0) log(`  Header found on row ${fed.headerOffset+1} — skipped ${fed.headerOffset} leading row(s)`);
     log(`  ${fedRows.length.toLocaleString()} rows, ${fedH.length} columns`);
 
     await setProg(28, `Reading Oro file…`);
     log(`Reading Oro file: ${uploads.oro.name}`);
-    const oro = await readSheet(uploads.oro, CFG.oro_sheet);
-    if (oro.fallback) log(`  Sheet '${CFG.oro_sheet}' not found — using '${oro.name}'`);
+    const oro = await readSheet(uploads.oro, CFG.oro_sheet, ORO_LAN_CANDS);
+    if (oro.sheetCount>1) log(`  Using sheet '${oro.name}' (of ${oro.sheetCount}: ${oro.sheetNames.join(', ')})`);
+    else if (oro.fallback) log(`  Sheet '${CFG.oro_sheet}' not found — using '${oro.name}'`);
+    if (oro.headerOffset>0) log(`  Header found on row ${oro.headerOffset+1} — skipped ${oro.headerOffset} leading row(s)`);
     const {headers:oroH, rows:oroAllRows} = rowsFromRaw(oro.raw);
     log(`  ${oroAllRows.length.toLocaleString()} total rows`);
     await setProg(52, `Detecting columns…`);
 
     // Detect columns
-    const lanFed = findCol(fedH,"Oro Loan ID","Oro Loan ID ","FREE_TEXT_13","Loan Number","LAN","Loan ID");
-    const lanOro = findCol(oroH,"Loan Number","Loan Account No.","LAN","Oro Loan ID");
+    const lanFed = findCol(fedH, ...FED_LAN_CANDS);
+    const lanOro = findCol(oroH, ...ORO_LAN_CANDS);
     const nameFed  = findCol(fedH,"ACCT_NAME","Customer Name","Borrower Name","Name");
     const acctNFed = findCol(fedH,"ACCT_NUM","Account Number","Account Num");
     const sanctFed = findCol(fedH,"SANCT_DATE","Sanction Date");
@@ -720,8 +785,8 @@ async function runRecon() {
     const renewOro = findCol(oroH,"Loans - Renew From Loan → Loan Number");
     const partnerOro = findCol(oroH, CFG.partner_col);
 
-    if (!lanFed) throw new Error(`Cannot find Loan ID column in Fed Bank file.\nHeaders: ${fedH.slice(0,10).join(', ')}`);
-    if (!lanOro) throw new Error(`Cannot find Loan ID column in Oro file.\nHeaders: ${oroH.slice(0,10).join(', ')}`);
+    if (!lanFed) throw new Error(`Cannot find Loan ID column in Fed Bank file.\nSheets: ${(fed.sheetNames||[]).join(', ')}\nHeaders read: ${fedH.slice(0,15).join(', ')}`);
+    if (!lanOro) throw new Error(`Cannot find Loan ID column in Oro file.\nSheets: ${(oro.sheetNames||[]).join(', ')}\nHeaders read: ${oroH.slice(0,15).join(', ')}`);
 
     log(`Loan ID — Fed Bank: '${lanFed}' | Oro: '${lanOro}'`);
     if (amtFed) log(`Sanction Amount — Fed Bank: '${amtFed}' | Oro: '${amtOro}'`);
