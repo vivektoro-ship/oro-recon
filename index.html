@@ -1043,6 +1043,7 @@ async function runRecon() {
     const lanOro = findCol(oroH, ...ORO_LAN_CANDS);
     const nameFed  = findCol(fedH,"ACCT_NAME","Customer Name","Borrower Name","Name");
     const acctNFed = findCol(fedH,"ACCT_NUM","Account Number","Account Num");
+    const custIdFed= findCol(fedH,"CUST_ID","Customer ID","Cust ID","CUSTOMER_ID");
     const sanctFed = findCol(fedH,"SANCT_DATE","Sanction Date");
     const startOro = findCol(oroH,"Loan Start Date");
     const amtFed   = findCol(fedH,"SANCT_LIM","Sanctioned Amount","Loan Amount");
@@ -1061,6 +1062,7 @@ async function runRecon() {
     if (!lanOro) throw new Error(`Cannot find Loan ID column in Oro file.\nSheets: ${(oro.sheetNames||[]).join(', ')}\nHeaders read: ${oroH.slice(0,15).join(', ')||'(none — sheet read as empty)'}\nWhat the engine saw:\n${fmtDiag(oro.diag)}`);
 
     log(`Loan ID — Fed Bank: '${lanFed}' | Oro: '${lanOro}'`);
+    log(`Customer ID (Fed Bank Only sheet): ${custIdFed?`'${custIdFed}'`:'⚠️ CUST_ID column not found — column will be blank'}`);
     if (amtFed) log(`Sanction Amount — Fed Bank: '${amtFed}' | Oro: '${amtOro}'`);
     if (schmFed) log(`Scheme — Fed Bank: '${schmFed}' | Oro: '${schmOro}'`);
     if (roiFed) log(`Interest Rate — Fed Bank: '${roiFed}' | Oro: '${roiOro}'`);
@@ -1147,6 +1149,7 @@ async function runRecon() {
       } else loanType='Not found in Oro';
       fedOnly.push({
         "Loan ID (Fed Bank)": lan,
+        "Customer ID (Fed Bank)": custIdFed?cellStr(row[custIdFed]||''):'',
         "Customer (Fed Bank)": nameFed?cellStr(row[nameFed]||''):'',
         "Account Number":     acctNFed?normalizeAcct(row[acctNFed]):'',
         "Loan Type":          loanType,
