@@ -606,6 +606,138 @@ function _chooseSheet(wb, pref, cands){
            sheetCount:names.length, sheetNames:names, diag:diag };
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// STREAMING XLSX READER  (pure browser APIs: DecompressionStream / Blob /
+// TextDecoder).  SheetJS reads each sheet as one big string, so a huge sheet
+// (e.g. the 750 MB Oro DB export, written as a streaming/data-descriptor ZIP)
+// blows past the engine's max-string limit and reads as empty. This reader
+// parses the ZIP central directory itself (authoritative sizes), then streams
+// the worksheet row-by-row so the full XML is never held in memory at once.
+// ═══════════════════════════════════════════════════════════════════════
+function _u16(b,o){ return b[o] | b[o+1]<<8; }
+function _u32(b,o){ return (b[o] | b[o+1]<<8 | b[o+2]<<16 | b[o+3]*16777216) >>> 0; }
+function _parseCentralDir(b){
+  let eocd=-1;
+  for(let i=b.length-22; i>=0 && i>=b.length-22-65557; i--){ if(_u32(b,i)===0x06054b50){ eocd=i; break; } }
+  if(eocd<0) throw new Error("Not a valid .xlsx (ZIP end-of-central-directory not found)");
+  let p=_u32(b,eocd+16), count=_u16(b,eocd+10); const E={}, dec=new TextDecoder();
+  for(let i=0;i<count;i++){
+    if(_u32(b,p)!==0x02014b50) break;
+    const method=_u16(b,p+10), csize=_u32(b,p+20), usize=_u32(b,p+24);
+    const nlen=_u16(b,p+28), elen=_u16(b,p+30), clen=_u16(b,p+32), lho=_u32(b,p+42);
+    E[dec.decode(b.subarray(p+46,p+46+nlen))]={method,csize,usize,lho};
+    p+=46+nlen+elen+clen;
+  }
+  return E;
+}
+function _dataStart(b,lho){
+  if(_u32(b,lho)!==0x04034b50) throw new Error("Bad local file header in .xlsx");
+  return lho+30+_u16(b,lho+26)+_u16(b,lho+28);
+}
+function _compBytes(b,e){ const ds=_dataStart(b,e.lho); return b.subarray(ds, ds+e.csize); }
+async function _inflateToString(b,e){
+  const comp=_compBytes(b,e);
+  if(e.method===0) return new TextDecoder().decode(comp);
+  const stream=new Blob([comp]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  const reader=stream.getReader(), dec=new TextDecoder(); let out="";
+  for(;;){ const r=await reader.read(); if(r.done)break; out+=dec.decode(r.value,{stream:true}); }
+  return out+dec.decode();
+}
+function _decodeEntities(s){
+  if(s.indexOf("&")<0) return s;
+  return s.replace(/&(#x?[0-9a-fA-F]+|amp|lt|gt|quot|apos);/g,(m,c)=>{
+    if(c==="amp")return "&"; if(c==="lt")return "<"; if(c==="gt")return ">";
+    if(c==="quot")return '"'; if(c==="apos")return "'";
+    if(c[0]==="#"){ const cp=(c[1]==="x"||c[1]==="X")?parseInt(c.slice(2),16):parseInt(c.slice(1),10); return isNaN(cp)?m:String.fromCodePoint(cp); }
+    return m;
+  });
+}
+function _parseSharedStrings(xml){
+  const out=[]; const re=/<si\b[^>]*>([\s\S]*?)<\/si>/g; let m;
+  while((m=re.exec(xml))){ let txt="",tm,tre=/<t\b[^>]*>([\s\S]*?)<\/t>/g; while((tm=tre.exec(m[1]))) txt+=tm[1]; out.push(_decodeEntities(txt)); }
+  return out;
+}
+function _colIdx(ref){ let n=0; for(let i=0;i<ref.length;i++){ const ch=ref.charCodeAt(i); if(ch<65||ch>90)break; n=n*26+(ch-64); } return n-1; }
+function _pickWorksheetPath(wbXml, relsXml, cdNames, preferred){
+  const sheets=[]; let m;
+  const sre=/<sheet\b([^>]*)\/?>/g;
+  while((m=sre.exec(wbXml))){ const a=m[1]; const nm=(a.match(/\bname="([^"]*)"/)||[])[1];
+    const rid=(a.match(/\br:id="([^"]*)"/)||a.match(/\br:embed="([^"]*)"/)||[])[1];
+    if(nm!=null) sheets.push({name:nm, rid}); }
+  const rel={}; const rre=/<Relationship\b([^>]*)\/?>/g;
+  while((m=rre.exec(relsXml))){ const a=m[1]; const id=(a.match(/\bId="([^"]*)"/)||[])[1];
+    let tgt=(a.match(/\bTarget="([^"]*)"/)||[])[1];
+    if(id&&tgt){ tgt=tgt.replace(/^\/?xl\//,"").replace(/^\//,""); rel[id]=tgt; } }
+  const toPath=t=> t.indexOf("xl/")===0?t:("xl/"+t);
+  const pick = (preferred && sheets.find(s=>s.name===preferred)) || sheets[0];
+  let chosenName=pick?pick.name:null, path=null;
+  if(pick && pick.rid && rel[pick.rid]) path=toPath(rel[pick.rid]);
+  if(!path || !cdNames.includes(path)){
+    path=cdNames.filter(n=>/^xl\/worksheets\/.*\.xml$/.test(n)).sort()[0];
+  }
+  return { path, name:chosenName||"Sheet1", sheetNames:sheets.map(s=>s.name), fallback:!!(preferred && chosenName!==preferred) };
+}
+async function _streamWorksheet(b, e, shared, onProgress){
+  const comp=_compBytes(b,e);
+  const source = e.method===0 ? new Blob([comp]).stream()
+                              : new Blob([comp]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  const reader=source.getReader(), dec=new TextDecoder();
+  let tail=""; const rows=[]; let width=0, bytesIn=0;
+  const cre=/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g, tInner=/<t\b[^>]*>([\s\S]*?)<\/t>/g;
+  function cellVal(attrs, inner){
+    if(inner==null||inner==="") return null;
+    const t=(attrs.match(/\bt="([^"]*)"/)||[])[1];
+    if(t==="inlineStr" || inner.indexOf("<is>")>=0){ let txt="",tm; tInner.lastIndex=0; let any=false;
+      while((tm=tInner.exec(inner))){ txt+=tm[1]; any=true; } return any?_decodeEntities(txt):null; }
+    const v=(inner.match(/<v\b[^>]*>([\s\S]*?)<\/v>/)||[])[1];
+    if(v==null) return null;
+    if(t==="s"){ const idx=+v; return shared[idx]!=null?shared[idx]:null; }
+    if(t==="str") return _decodeEntities(v);
+    if(t==="b") return v==="1";
+    if(t==="e") return null;
+    const num=Number(v); return isNaN(num)?_decodeEntities(v):num;
+  }
+  function parseRow(rowXml){ const arr=[]; let mm; cre.lastIndex=0;
+    while((mm=cre.exec(rowXml))){ const attrs=mm[1], inner=mm[2];
+      const ref=(attrs.match(/\br="([A-Z]+)\d+"/)||[])[1];
+      const ci=ref!=null?_colIdx(ref):arr.length;
+      const val=cellVal(attrs, inner);
+      while(arr.length<ci) arr.push(null); arr[ci]=val; }
+    return arr; }
+  function flush(text){
+    let idx=0;
+    for(;;){
+      const s=text.indexOf("<row", idx); if(s<0){ tail=text.slice(idx); return; }
+      const gt=text.indexOf(">", s); if(gt<0){ tail=text.slice(s); return; }
+      if(text[gt-1]==="/"){ rows.push([]); idx=gt+1; continue; } // self-closing empty row
+      const eTag=text.indexOf("</row>", gt); if(eTag<0){ tail=text.slice(s); return; }
+      const arr=parseRow(text.slice(s, eTag+6));
+      if(rows.length===0){ let w=0; for(let i=0;i<arr.length;i++){ const v=arr[i]; if(v!=null&&String(v).trim()!=="") w=i+1; }
+        width=w||arr.length; arr.length=width; rows.push(arr); }
+      else { if(arr.length>width) arr.length=width; else while(arr.length<width) arr.push(null); rows.push(arr); }
+      idx=eTag+6;
+    }
+  }
+  for(;;){ const r=await reader.read(); if(r.done)break; bytesIn+=r.value.length;
+    tail+=dec.decode(r.value,{stream:true}); flush(tail);
+    if(onProgress && rows.length) await onProgress(rows.length, bytesIn, e.usize); }
+  tail+=dec.decode(); if(tail.indexOf("<row")>=0) flush(tail);
+  return rows;
+}
+async function readXlsxStreaming(bytes, preferredSheet, onProgress){
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const cd=_parseCentralDir(b), names=Object.keys(cd);
+  const wbXml   = cd["xl/workbook.xml"]            ? await _inflateToString(b, cd["xl/workbook.xml"]) : "";
+  const relsXml = cd["xl/_rels/workbook.xml.rels"] ? await _inflateToString(b, cd["xl/_rels/workbook.xml.rels"]) : "";
+  const pick=_pickWorksheetPath(wbXml, relsXml, names, preferredSheet);
+  if(!pick.path || !cd[pick.path]) throw new Error("Could not locate worksheet data inside the .xlsx");
+  const shared = cd["xl/sharedStrings.xml"] ? _parseSharedStrings(await _inflateToString(b, cd["xl/sharedStrings.xml"])) : [];
+  const raw = await _streamWorksheet(b, cd[pick.path], shared, onProgress);
+  return { name:pick.name, fallback:pick.fallback, raw, headerOffset:0, hadCand:false, refRepaired:false,
+           sheetCount:pick.sheetNames.length||1, sheetNames:pick.sheetNames.length?pick.sheetNames:[pick.name],
+           streamed:true, diag:[{name:pick.name, ref:raw.length+" rows", cells:raw.length, sample:[]}] };
+}
+
 function parseAmount(v) {
   const s = cellStr(v).replace(/,/g,'').replace(/₹/g,'').trim();
   const n = parseFloat(s);
@@ -721,6 +853,9 @@ function readFile(file) {
 let _xlsxWorker = null;
 function getXlsxWorker() {
   if (_xlsxWorker) return _xlsxWorker;
+  // Opened as a local file (no server)? The worker can't importScripts the
+  // xlsx file, so skip it — main-thread parsing uses the inlined XLSX instead.
+  if (location.protocol === 'file:') return null;
   const xlsxUrl = JSON.stringify(new URL('xlsx.full.min.js', location.href).href);
   const code =
     'self.importScripts(' + xlsxUrl + ');' +
@@ -734,8 +869,11 @@ function getXlsxWorker() {
   return _xlsxWorker;
 }
 
-function readSheet(file, preferredSheet, cands) {
-  cands = cands || [];
+// Threshold above which we skip SheetJS entirely and stream-parse: SheetJS
+// holds each sheet as one string and a big export exceeds the engine's limit.
+const STREAM_THRESHOLD = 18 * 1024 * 1024; // 18 MB
+
+function readSheetSheetJS(file, preferredSheet, cands) {
   return readFile(file).then(buf => new Promise((resolve, reject) => {
     let worker = null;
     try { worker = getXlsxWorker(); } catch(_) { worker = null; }
@@ -752,6 +890,35 @@ function readSheet(file, preferredSheet, cands) {
     worker.addEventListener('error', onErr);
     worker.postMessage({buf, pref: preferredSheet || null, cands}, [buf]); // transfer buffer = no copy
   }));
+}
+
+// Did SheetJS actually get any cells out of the workbook?
+function _resultIsEmpty(res){
+  if(!res) return true;
+  if(res.diag && res.diag.length && res.diag.every(d=>!d.cells)) return true;
+  return (!res.raw || res.raw.length===0);
+}
+
+async function readSheet(file, preferredSheet, cands, onProgress) {
+  cands = cands || [];
+  const streamingOK = (typeof DecompressionStream !== 'undefined');
+  // Big file → go straight to the streaming reader (SheetJS can't hold it).
+  if (streamingOK && file.size >= STREAM_THRESHOLD) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return await readXlsxStreaming(bytes, preferredSheet, onProgress);
+  }
+  // Normal file → SheetJS (battle-tested); fall back to streaming if it reads empty.
+  try {
+    const res = await readSheetSheetJS(file, preferredSheet, cands);
+    if (!_resultIsEmpty(res)) return res;
+    if (!streamingOK) return res;
+  } catch (err) {
+    if (!streamingOK) throw err;
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const streamed = await readXlsxStreaming(bytes, preferredSheet, onProgress);
+  streamed.recoveredFromEmpty = true;
+  return streamed;
 }
 
 // Turn the worker's array-of-arrays into {headers, rows} (header repair preserved).
@@ -804,7 +971,12 @@ async function runRecon() {
 
     await setProg(28, `Reading Oro file…`);
     log(`Reading Oro file: ${uploads.oro.name}`);
-    const oro = await readSheet(uploads.oro, CFG.oro_sheet, ORO_LAN_CANDS);
+    let _lastOroProg=0;
+    const oro = await readSheet(uploads.oro, CFG.oro_sheet, ORO_LAN_CANDS, async (n)=>{
+      if (n-_lastOroProg>=20000){ _lastOroProg=n; await setProg(28+Math.min(20,n/124772*20), `Reading Oro file… ${n.toLocaleString()} rows`); }
+    });
+    if (oro.streamed) log(`  Large file — streamed directly (the spreadsheet engine can't hold a sheet this big)`);
+    if (oro.recoveredFromEmpty) log(`  ⚠️  Engine read it as empty — recovered via streaming reader`);
     if (oro.sheetCount>1) log(`  Using sheet '${oro.name}' (of ${oro.sheetCount}: ${oro.sheetNames.join(', ')})`);
     else if (oro.fallback) log(`  Sheet '${CFG.oro_sheet}' not found — using '${oro.name}'`);
     if (oro.headerOffset>0) log(`  Header found on row ${oro.headerOffset+1} — skipped ${oro.headerOffset} leading row(s)`);
