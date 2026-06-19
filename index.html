@@ -1149,8 +1149,8 @@ async function runRecon() {
       } else loanType='Not found in Oro';
       fedOnly.push({
         "Loan ID (Fed Bank)": lan,
-        "Customer ID (Fed Bank)": custIdFed?cellStr(row[custIdFed]||''):'',
         "Customer (Fed Bank)": nameFed?cellStr(row[nameFed]||''):'',
+        "Customer ID":        custIdFed?cellStr(row[custIdFed]||''):'',
         "Account Number":     acctNFed?normalizeAcct(row[acctNFed]):'',
         "Loan Type":          loanType,
         "Loan Start Date":    loanStart,
@@ -1387,13 +1387,22 @@ function downloadReport() {
     ["⚠️  OMGL ID in Fed Bank only",`${fedOnly.length.toLocaleString()}${pct(fedOnly.length)}`],
   ];
 
+  // Column width to match the reference report exactly: max(16, header len) + 2,
+  // plus Excel's standard 0.7265625 padding (written as the literal width).
+  const colWidth = h => ({ width: Math.max(16, String(h).length) + 2 + 0.7265625 });
+
   function addSheet(name, data) {
     if (!data.length) { XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Info"],["No entries"]]), name); return; }
     const ws=XLSX.utils.json_to_sheet(data);
+    // headers in the same union-order json_to_sheet uses for columns
+    const headers=[], seen=new Set();
+    for (const row of data) for (const k of Object.keys(row)) if (!seen.has(k)) { seen.add(k); headers.push(k); }
+    ws['!cols']=headers.map(colWidth);
     XLSX.utils.book_append_sheet(wb,ws,name);
   }
 
   const sumWs=XLSX.utils.aoa_to_sheet(summary);
+  sumWs['!cols']=[{width:55.7265625},{width:30.7265625}];
   XLSX.utils.book_append_sheet(wb,sumWs,"Summary");
   addSheet("Matched",                matched);
   addSheet("Matched (Other Issues)", otherIssues);
