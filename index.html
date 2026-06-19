@@ -508,6 +508,28 @@ const ORO_LAN_CANDS = ["Loan Number","Loan Account No.","LAN","Oro Loan ID","Loa
 // These run inside the Web Worker too (serialised via .toString()), so keep
 // them ES5-plain, self-contained, and underscore-named.
 function _cstr(v){ return (v===undefined||v===null) ? '' : String(v).trim(); }
+// Read a worksheet to an array-of-arrays. Some exporters (e.g. Metabase /
+// streaming xlsx writers) omit or under-report the worksheet dimension
+// (!ref), which makes SheetJS return ZERO rows even though every cell is
+// present. When that happens, rebuild !ref from the real cell addresses and
+// re-parse. Marks the result so the caller can surface that it kicked in.
+function _readAOA(ws){
+  if(!ws) return [];
+  var raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:true});
+  if(raw && raw.length) return raw;
+  var keys=Object.keys(ws).filter(function(k){return k.charAt(0)!=="!";});
+  if(!keys.length) return raw||[];
+  var minC=Infinity,minR=Infinity,maxC=-1,maxR=-1;
+  for(var i=0;i<keys.length;i++){
+    var rc=XLSX.utils.decode_cell(keys[i]);
+    if(rc.c<minC)minC=rc.c; if(rc.c>maxC)maxC=rc.c;
+    if(rc.r<minR)minR=rc.r; if(rc.r>maxR)maxR=rc.r;
+  }
+  ws["!ref"]=XLSX.utils.encode_range({s:{c:minC,r:minR},e:{c:maxC,r:maxR}});
+  var fixed=XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:true})||[];
+  fixed.__refRepaired=true;
+  return fixed;
+}
 function _rowHasCand(row, cands){
   if(!row) return false;
   for(var j=0;j<row.length;j++){
@@ -540,10 +562,10 @@ function _chooseSheet(wb, pref, cands){
   var names=wb.SheetNames, evals=[];
   for(var s=0;s<names.length;s++){
     var nm=names[s];
-    var raw=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:null,raw:true});
+    var raw=_readAOA(wb.Sheets[nm]);
     var hr=_headerRowIdx(raw,cands);
     var hasCand=_rowHasCand(raw[hr]||[],cands);
-    evals.push({name:nm, raw:raw, hr:hr, hasCand:hasCand,
+    evals.push({name:nm, raw:raw, hr:hr, hasCand:hasCand, repaired:!!(raw&&raw.__refRepaired),
                 dataRows:Math.max(0,raw.length-hr-1), isPref:(!!pref && nm===pref)});
   }
   var withCand=evals.filter(function(c){return c.hasCand;});
@@ -557,7 +579,8 @@ function _chooseSheet(wb, pref, cands){
   }
   return { name:chosen.name, fallback:(!!pref && chosen.name!==pref),
            raw:chosen.raw.slice(chosen.hr), headerOffset:chosen.hr,
-           hadCand:chosen.hasCand, sheetCount:names.length, sheetNames:names };
+           hadCand:chosen.hasCand, refRepaired:!!chosen.repaired,
+           sheetCount:names.length, sheetNames:names };
 }
 
 function parseAmount(v) {
@@ -678,7 +701,7 @@ function getXlsxWorker() {
   const xlsxUrl = JSON.stringify(new URL('xlsx.full.min.js', location.href).href);
   const code =
     'self.importScripts(' + xlsxUrl + ');' +
-    _cstr.toString() + _rowHasCand.toString() + _headerRowIdx.toString() + _chooseSheet.toString() +
+    _cstr.toString() + _readAOA.toString() + _rowHasCand.toString() + _headerRowIdx.toString() + _chooseSheet.toString() +
     'self.onmessage=function(e){var d=e.data;try{' +
     'var wb=XLSX.read(d.buf,{type:"array",cellDates:false,raw:false});' +
     'var r=_chooseSheet(wb,d.pref,d.cands||[]); r.ok=true;' +
@@ -762,6 +785,7 @@ async function runRecon() {
     if (oro.sheetCount>1) log(`  Using sheet '${oro.name}' (of ${oro.sheetCount}: ${oro.sheetNames.join(', ')})`);
     else if (oro.fallback) log(`  Sheet '${CFG.oro_sheet}' not found — using '${oro.name}'`);
     if (oro.headerOffset>0) log(`  Header found on row ${oro.headerOffset+1} — skipped ${oro.headerOffset} leading row(s)`);
+    if (oro.refRepaired) log(`  ⚠️  Sheet had a missing/broken range — rebuilt it from the actual cells`);
     const {headers:oroH, rows:oroAllRows} = rowsFromRaw(oro.raw);
     log(`  ${oroAllRows.length.toLocaleString()} total rows`);
     await setProg(52, `Detecting columns…`);
